@@ -1,0 +1,28 @@
+# PlatformIO — build y librerías descargadas
+.pio/
+
+# IDE
+.vscode/
+*.code-workspace
+.idea/
+
+# Node (scripts auxiliares)
+node_modules/
+
+# Binarios compilados
+*.bin
+*.elf
+*.hex
+*.map
+
+# Archivos de credenciales — NUNCA versionar
+credentials.h
+secrets.h
+wifi_config.h
+config_privado.h
+
+# Sistema
+.DS_Store
+Thumbs.db
+*.swp
+*~
