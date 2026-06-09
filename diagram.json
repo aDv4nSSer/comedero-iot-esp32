@@ -3,16 +3,16 @@
   "author": "Antonio - UBO",
   "editor": "wokwi",
   "parts": [
-    { "type": "board-esp32-devkit-c-v4", "id": "esp",   "top": 20,   "left": 0,    "attrs": {} },
+    { "type": "board-esp32-devkit-c-v4", "id": "esp",    "top": 20,   "left": 0,    "attrs": {} },
 
     { "type": "wokwi-hx711",    "id": "hx711",  "top": -180, "left": 290,  "attrs": {} },
     { "type": "wokwi-hc-sr04",  "id": "ultra",  "top": -190, "left": -290, "attrs": { "distance": "5" } },
-
     { "type": "wokwi-lcd2004",  "id": "lcd",    "top": 230,  "left": -290, "attrs": { "pins": "i2c" } },
     { "type": "wokwi-led-ring", "id": "ring",   "top": 200,  "left": 295,  "attrs": { "pixels": "12" } },
 
-    { "type": "wokwi-l298n",    "id": "l298",   "top": 310,  "left": 100,  "attrs": {} },
-    { "type": "wokwi-dc-motor", "id": "motor",  "top": 390,  "left": -50,  "attrs": {} }
+    { "type": "wokwi-servo",    "id": "servo",  "top": 310,  "left": 210,  "attrs": {} },
+    { "type": "wokwi-buzzer",   "id": "buzzer", "top": 370,  "left": 340,  "attrs": { "volume": "0.5" } },
+    { "type": "wokwi-hx711",   "id": "hx711b", "top": 380,  "left": -120, "attrs": {} }
   ],
   "connections": [
     ["esp:GND.1", "hx711:GND",  "black",  []],
@@ -34,13 +34,17 @@
     ["esp:5V",    "ring:VCC",   "red",    []],
     ["esp:GND.3", "ring:GND",   "black",  []],
 
-    ["esp:25",    "l298:ENA",   "white",  []],
-    ["esp:26",    "l298:IN1",   "gray",   []],
-    ["esp:27",    "l298:IN2",   "brown",  []],
-    ["esp:5V",    "l298:+12V",  "red",    []],
-    ["esp:GND.3", "l298:GND",   "black",  []],
-    ["l298:OUT1", "motor:1",    "green",  []],
-    ["l298:OUT2", "motor:2",    "yellow", []]
+    ["esp:13",    "servo:PWM",  "orange", []],
+    ["esp:GND.3", "servo:GND",  "black",  []],
+    ["esp:5V",    "servo:V+",   "red",    []],
+
+    ["esp:32",    "buzzer:1",   "brown",  []],
+    ["esp:GND.3", "buzzer:2",   "black",  []],
+
+    ["esp:GND.1", "hx711b:GND", "black",  []],
+    ["esp:3V3",   "hx711b:VCC", "red",    []],
+    ["esp:14",    "hx711b:DT",  "green",  []],
+    ["esp:15",    "hx711b:SCK", "yellow", []]
   ],
   "dependencies": {}
 }

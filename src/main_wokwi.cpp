@@ -1,36 +1,34 @@
 /*
  * ═══════════════════════════════════════════════════════════════════════
- * COMEDERO INTELIGENTE IoT — v4.0-SIM (Simulación Wokwi)
+ * COMEDERO INTELIGENTE IoT — v4.1-SIM (Simulación Wokwi)
  * ═══════════════════════════════════════════════════════════════════════
- * Versión adaptada para simulación en Wokwi VS Code.
- * Wokwi NO soporta BLE ni OTA real, por lo que:
+ * Versión adaptada para Wokwi VS Code. Cambios vs hardware real:
  *
- *   BLE  → reemplazado por comandos Serial (teclado en Serial Monitor)
- *   OTA  → simulado visualmente con millis() (5 segundos animados)
+ *   BLE      → comandos Serial (Serial Monitor de Wokwi)
+ *   OTA      → animación visual de 5 segundos con millis()
+ *   Vibrador → pin definido pero sin efecto visual en Wokwi
+ *   Buzzer   → tone() funciona nativamente en Wokwi
  *
- * TODO LO DEMÁS es idéntico a la versión hardware real v4.0:
- *   - FSM 4 estados, Edge Computing RER, EMA, Fusión sensorial
- *   - LCD 2004 I2C, NeoPixel 12 LEDs, Motor DC L298N
- *   - MQTT telemetría real, NTP Chile UTC-3
- *
- * ───────────────────────────────────────────────────────────────────────
- * COMANDOS SERIAL (escribir en Serial Monitor de Wokwi):
+ * COMANDOS SERIAL (escribir en Serial Monitor):
  *   CONFIG:nombre,peso_kg,factor_rer   → configura perfil del perro
  *   ALIMENTO:marca,kcal_g              → configura alimento
  *   DISPENSAR                          → dispensación manual
+ *   PLATILLO                           → simula +80g en platillo
  *   OTA                                → simula actualización firmware
  *   BOVEDA                             → fuerza detección de atasco
  *   STATUS                             → muestra telemetría completa
  *
- * SECUENCIA DE DEMO (presentación):
+ * SECUENCIA DE DEMO v4.1 (presentación):
  *   1. Arranque → bienvenida → REPOSO
  *   2. "STATUS"               → ver telemetría en Serial
  *   3. "CONFIG:Rex,20.0,130.0"→ cambiar perfil en vivo
- *   4. "DISPENSAR"            → motor gira + LCD dispensando
- *   5. Bajar slider HX711     → dispensación completa
- *   6. "BOVEDA"               → error + NeoPixel rojo parpadeando
- *   7. Esperar 10s            → auto-reset a REPOSO
- *   8. "OTA"                  → barra de progreso 5s + NeoPixel azul
+ *   4. "DISPENSAR"            → servo gira 90° + LCD dispensando
+ *   5. Bajar slider HX711     → peso del tanque baja
+ *   6. "PLATILLO"             → simula +80g en platillo mascota
+ *   7. Sistema verifica       → LCD "DISPENSACION OK" o "NO VERIF"
+ *   8. "BOVEDA"               → error + buzzer + NeoPixel rojo
+ *   9. Esperar 10s            → auto-reset a REPOSO
+ *  10. "OTA"                  → barra azul 5s → verde → "v4.1"
  * ═══════════════════════════════════════════════════════════════════════
  */
 
@@ -41,65 +39,55 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <Adafruit_NeoPixel.h>
+#include <ESP32Servo.h>
 #include <time.h>
 #include <math.h>
 
 // ─────────────────────────────────────────────────────────────────────
-// WIFI WOKWI — Red virtual integrada en el simulador
+// WIFI WOKWI
 // ─────────────────────────────────────────────────────────────────────
 const char* WIFI_SSID = "Wokwi-GUEST";
 const char* WIFI_PASS = "";
 
 // ─────────────────────────────────────────────────────────────────────
-// MQTT
+// MQTT Y NTP
 // ─────────────────────────────────────────────────────────────────────
 const char* MQTT_BROKER = "broker.hivemq.com";
 const int   MQTT_PORT   = 1883;
 const char* TOPIC_TELEM = "comedero/telemetria";
 const char* TOPIC_CMD   = "comedero/comando";
-
-// ─────────────────────────────────────────────────────────────────────
-// NTP — Chile UTC-3
-// ─────────────────────────────────────────────────────────────────────
 const char* NTP_SERVER   = "pool.ntp.org";
 const long  GMT_OFFSET   = -3 * 3600;
 const int   DAYLIGHT_SEC = 0;
 
 // ─────────────────────────────────────────────────────────────────────
-// PINES (idénticos al hardware real)
+// PINES v4.1 (idénticos al hardware real)
 // ─────────────────────────────────────────────────────────────────────
 #define PIN_HX711_DT    16
 #define PIN_HX711_SCK   17
 #define PIN_TRIG         5
 #define PIN_ECHO        18
-#define PIN_IN1         26
-#define PIN_IN2         27
-#define PIN_ENA         25
+#define PIN_SERVO       13
+#define PIN_BUZZER      32
+#define PIN_VIBRADOR    33   // definido para compatibilidad; sin efecto visual en Wokwi
+#define PIN_HX711_DT2   14
+#define PIN_HX711_SCK2  15
 #define PIN_NEOPIXEL    19
 #define PIN_SDA         21
 #define PIN_SCL         22
-
-#define PWM_CANAL   0
-#define PWM_FREQ    5000
-#define PWM_RES     8
 
 #define NUM_PIXELS  12
 #define BRILLO      80
 
 // ─────────────────────────────────────────────────────────────────────
-// CONSTANTES FÍSICAS (idénticas al hardware real)
+// CONSTANTES
 // ─────────────────────────────────────────────────────────────────────
-const float CAPACIDAD_TANQUE_G = 1000.0f;
-const float DIST_VACIO_CM      =   20.0f;
-const float UMBRAL_BOVEDA_PCT  =    0.30f;
-const float ALPHA_EMA          =    0.30f;
+const float CAPACIDAD_TANQUE_G   = 1000.0f;
+const float DIST_VACIO_CM        =   20.0f;
+const float UMBRAL_BOVEDA_PCT    =    0.30f;
+const float ALPHA_EMA            =    0.30f;
+const float UMBRAL_VERIF_PCT     =    0.70f;
 const unsigned long TIMEOUT_MOTOR_MS    = 30000;
-
-// ─────────────────────────────────────────────────────────────────────
-// OTA SIMULADO — duración de la animación de "descarga"
-// En hardware real esto lo maneja ArduinoOTA vía red.
-// En Wokwi lo simulamos con un timer de millis().
-// ─────────────────────────────────────────────────────────────────────
 const unsigned long OTA_SIM_DURACION_MS = 5000;
 
 // ─────────────────────────────────────────────────────────────────────
@@ -113,14 +101,14 @@ Estado estadoActual = REPOSO;
 // ─────────────────────────────────────────────────────────────────────
 WiFiClient        espClient;
 PubSubClient      mqtt(espClient);
+Servo             compuerta;
 HX711             balanza;
+HX711             balanza2;
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 Adafruit_NeoPixel anillo(NUM_PIXELS, PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800);
 
 // ─────────────────────────────────────────────────────────────────────
-// PERFIL DEL DISPENSADOR
-// En la versión real los parámetros llegan por BLE.
-// En Wokwi se carga un perfil demo y se modifica por Serial.
+// PERFIL DEMO hardcodeado (en hardware real llega por BLE)
 // ─────────────────────────────────────────────────────────────────────
 struct PerfilDispensador {
     char  nombre_perro[32]   = "Demo";
@@ -130,32 +118,34 @@ struct PerfilDispensador {
     float kcal_por_gramo     = 3.8f;
     int   horarios[4]        = {8, 13, 19, -1};
     int   num_horarios       = 3;
-    bool  configurado        = true;  // perfil demo listo desde el inicio
+    bool  configurado        = true;
 };
 
 PerfilDispensador perfil;
 
 // ─────────────────────────────────────────────────────────────────────
-// VARIABLES OPERATIVAS (idénticas al hardware real)
+// VARIABLES OPERATIVAS
 // ─────────────────────────────────────────────────────────────────────
 float         masaObjetivoG        = 0.0f;
 float         masaInicialG         = 0.0f;
 float         consumoEMA           = 50.0f;
 float         masaUltimaLectura    = 0.0f;
+float         masaPlatilloAntes    = 0.0f;
+float         masaPlatilloActual   = 0.0f;
 float         distanciaUltima      = 0.0f;
+String        estadoVerificacion   = "PENDIENTE";
 int           ultimaHoraDispensada = -1;
 unsigned long ultimoEnvioTelem     = 0;
 unsigned long inicioDispensacion   = 0;
 unsigned long ultimaActualizLCD    = 0;
 unsigned long ultimaAnimacion      = 0;
+unsigned long ultimaAlerta         = 0;
 int           pixelAnimado         = 0;
 
-// ─────────────────────────────────────────────────────────────────────
-// VARIABLES EXCLUSIVAS DE SIMULACIÓN
-// ─────────────────────────────────────────────────────────────────────
-bool          forzarBoveda   = false;   // "BOVEDA" por Serial activa esto
-unsigned long otaSimInicio   = 0;       // timestamp inicio OTA simulado
-String        serialBuffer   = "";      // buffer acumulador de Serial
+// Variables exclusivas de simulación
+bool          forzarBoveda  = false;
+unsigned long otaSimInicio  = 0;
+String        serialBuffer  = "";
 
 // ─────────────────────────────────────────────────────────────────────
 // FORWARD DECLARATIONS
@@ -165,22 +155,25 @@ void  lcdMostrarError(const String& motivo);
 void  lcdMostrarReposo();
 void  lcdMostrarDispensando();
 void  lcdMostrarBienvenida();
+void  lcdMostrarVerificacion();
 void  neoColorSolido(uint8_t r, uint8_t g, uint8_t b);
 void  neoApagar();
 void  neoNivelInventario(float masa);
 void  neoGirar(uint8_t r, uint8_t g, uint8_t b);
 void  neoParpadeoRojo();
-void  motorDetener();
-void  motorAvanzar(int vel = 200);
+void  abrirCompuerta();
+void  cerrarCompuerta();
+void  alertaAtasco();
 void  publicarTelemetria(const String& alerta = "");
 float leerMasaG();
+float leerMasaPlatilloG();
 float calcularRacion(float porcentajeHorario = 1.0f);
 void  conectarMQTT();
 void  imprimirStatus();
+void  iniciarDispensacion();
 
 // ═══════════════════════════════════════════════════════════════════════
-// EDGE COMPUTING — CÁLCULO RER
-// Idéntico al hardware real. Los parámetros llegan por Serial (sim BLE).
+// EDGE COMPUTING — CÁLCULO RER (idéntico al hardware real)
 // ═══════════════════════════════════════════════════════════════════════
 float calcularRacion(float porcentajeHorario) {
     if (perfil.peso_kg <= 0.0f || perfil.kcal_por_gramo <= 0.0f) return 0.0f;
@@ -188,10 +181,6 @@ float calcularRacion(float porcentajeHorario) {
     return (rer / perfil.kcal_por_gramo) * porcentajeHorario;
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// EMA — PREDICCIÓN DE CONSUMO DIARIO
-// Idéntica al hardware real.
-// ═══════════════════════════════════════════════════════════════════════
 void actualizarEMA(float gramosDispensados) {
     consumoEMA = (ALPHA_EMA * gramosDispensados) + ((1.0f - ALPHA_EMA) * consumoEMA);
     Serial.printf("[EMA] Consumo estimado: %.1f g/dia\n", consumoEMA);
@@ -199,48 +188,37 @@ void actualizarEMA(float gramosDispensados) {
 
 // ═══════════════════════════════════════════════════════════════════════
 // SERIAL — REEMPLAZO DE BLE
-//
-// En hardware real: la app móvil escribe en características BLE.
-// En Wokwi:         el usuario escribe comandos en el Serial Monitor.
-//
-// Comandos disponibles:
-//   CONFIG:nombre,peso_kg,factor_rer   → perfil del perro
-//   ALIMENTO:marca,kcal_g              → datos del alimento
-//   DISPENSAR                          → dispensación inmediata
-//   OTA                                → simular actualización firmware
-//   BOVEDA                             → forzar efecto bóveda
-//   STATUS                             → telemetría completa
 // ═══════════════════════════════════════════════════════════════════════
 
 void imprimirStatus() {
     int nH = max(perfil.num_horarios, 1);
     float dias = (consumoEMA > 0.1f) ? (masaUltimaLectura / consumoEMA) : 999.0f;
-    Serial.println(F("\n[STATUS] ────────────────────────────"));
+    Serial.println(F("\n[STATUS] ────────────────────────────────"));
     Serial.printf("  Estado FSM:   %s\n",
-        estadoActual == REPOSO       ? "REPOSO" :
-        estadoActual == DISPENSANDO  ? "DISPENSANDO" :
-        estadoActual == ERROR        ? "ERROR" : "OTA");
-    Serial.printf("  Masa:         %.1f g\n",    masaUltimaLectura);
+        estadoActual == REPOSO      ? "REPOSO" :
+        estadoActual == DISPENSANDO ? "DISPENSANDO" :
+        estadoActual == ERROR       ? "ERROR" : "OTA");
+    Serial.printf("  Masa tanque:  %.1f g\n",    masaUltimaLectura);
+    Serial.printf("  Masa platill: %.1f g\n",    masaPlatilloActual);
+    Serial.printf("  Verificacion: %s\n",        estadoVerificacion.c_str());
     Serial.printf("  Distancia US: %.1f cm\n",   distanciaUltima);
     Serial.printf("  Consumo EMA:  %.1f g/dia\n", consumoEMA);
     Serial.printf("  Dias rest.:   %.1f dias\n",  dias);
-    Serial.println(F("  ── Perfil ──────────────────────────"));
+    Serial.println(F("  ── Perfil ──────────────────────────────"));
     Serial.printf("  Perro:        %s, %.1f kg\n", perfil.nombre_perro, perfil.peso_kg);
     Serial.printf("  Factor RER:   %.1f\n",        perfil.factor_rer);
     Serial.printf("  Alimento:     %s, %.2f kcal/g\n", perfil.marca_alimento, perfil.kcal_por_gramo);
     Serial.printf("  Racion/com.:  %.1f g\n",    calcularRacion(1.0f / nH));
-    Serial.printf("  RER total:    %.1f g/dia\n", calcularRacion(1.0f));
     Serial.print(F("  Horarios:     "));
     for (int i = 0; i < perfil.num_horarios; i++) Serial.printf("%dh ", perfil.horarios[i]);
     Serial.println();
-    Serial.println(F("[STATUS] ────────────────────────────\n"));
+    Serial.println(F("[STATUS] ────────────────────────────────\n"));
 }
 
 void procesarComandoSerial(const String& linea) {
     Serial.println("[SERIAL] Recibido: " + linea);
 
-    // ── CONFIG:nombre,peso_kg,factor_rer ─────────────────────────────
-    // Simula la característica BLE de perfil del perro
+    // CONFIG:nombre,peso_kg,factor_rer → simula característica BLE perfil
     if (linea.startsWith("CONFIG:")) {
         String params = linea.substring(7);
         int c1 = params.indexOf(',');
@@ -258,17 +236,16 @@ void procesarComandoSerial(const String& linea) {
                 Serial.printf("[SIM-BLE] Perfil: %s %.1fkg factor=%.1f → racion=%.1fg\n",
                               perfil.nombre_perro, perfil.peso_kg,
                               perfil.factor_rer, calcularRacion(1.0f / nH));
-                ultimaActualizLCD = 0; // forzar actualización inmediata del LCD
+                ultimaActualizLCD = 0;
             } else {
-                Serial.println("[SIM-BLE] ERROR: peso y factor_rer deben ser > 0");
+                Serial.println("[SIM-BLE] ERROR: peso y factor > 0");
             }
         } else {
             Serial.println("[SIM-BLE] Formato: CONFIG:nombre,peso_kg,factor_rer");
         }
     }
 
-    // ── ALIMENTO:marca,kcal_g ────────────────────────────────────────
-    // Simula la característica BLE de datos del alimento
+    // ALIMENTO:marca,kcal_g → simula característica BLE alimento
     else if (linea.startsWith("ALIMENTO:")) {
         String params = linea.substring(9);
         int c = params.indexOf(',');
@@ -278,64 +255,62 @@ void procesarComandoSerial(const String& linea) {
             if (kcal > 0.0f) {
                 strncpy(perfil.marca_alimento, marca.c_str(), 31);
                 perfil.kcal_por_gramo = kcal;
-                Serial.printf("[SIM-BLE] Alimento: %s → %.2f kcal/g\n",
+                Serial.printf("[SIM-BLE] Alimento: %s %.2f kcal/g\n",
                               perfil.marca_alimento, perfil.kcal_por_gramo);
                 ultimaActualizLCD = 0;
-            } else {
-                Serial.println("[SIM-BLE] ERROR: kcal_g debe ser > 0");
             }
         } else {
             Serial.println("[SIM-BLE] Formato: ALIMENTO:marca,kcal_g");
         }
     }
 
-    // ── DISPENSAR ────────────────────────────────────────────────────
-    // Simula comando BLE {"cmd":"dispensar"}
+    // DISPENSAR → simula {"cmd":"dispensar"} por BLE
     else if (linea == "DISPENSAR") {
         if (estadoActual == REPOSO && perfil.configurado) {
-            int nH             = max(perfil.num_horarios, 1);
-            masaObjetivoG      = calcularRacion(1.0f / nH);
-            masaInicialG       = masaUltimaLectura;
-            inicioDispensacion = millis();
-            estadoActual       = DISPENSANDO;
-            Serial.printf("[SIM-BLE] Dispensando %.1fg → estado DISPENSANDO\n", masaObjetivoG);
+            iniciarDispensacion();
+            Serial.printf("[SIM-BLE] Dispensando %.1fg → servo abierto\n", masaObjetivoG);
         } else {
-            Serial.printf("[SIM-BLE] DISPENSAR ignorado (estado=%d, configurado=%d)\n",
-                          estadoActual, perfil.configurado);
+            Serial.printf("[SIM-BLE] DISPENSAR ignorado (estado=%d)\n", estadoActual);
         }
     }
 
-    // ── OTA ──────────────────────────────────────────────────────────
-    // Simula comando BLE {"cmd":"ota"}
-    // En hardware real inicia ArduinoOTA; aquí arranca la animación.
+    // PLATILLO → simula que la mascota recibió alimento en el platillo (+80g)
+    // En hardware real: el HX711b lee el peso real; en Wokwi no hay sensor físico
+    else if (linea == "PLATILLO") {
+        masaPlatilloActual += 80.0f;
+        if (masaPlatilloActual > CAPACIDAD_TANQUE_G)
+            masaPlatilloActual = CAPACIDAD_TANQUE_G;
+        Serial.printf("[SIM] Platillo simulado: +80g → total %.1fg\n", masaPlatilloActual);
+        Serial.printf("[SIM] (En hardware: HX711b en GPIO14/15 lee el platillo fisico)\n");
+    }
+
+    // OTA → simula {"cmd":"ota"} por BLE
     else if (linea == "OTA") {
-        Serial.println("[SIM-OTA] Iniciando simulacion de actualizacion firmware...");
-        Serial.println("[SIM-OTA] (En hardware real: pio run -e esp32dev_ota --target upload)");
-        otaSimInicio = 0; // resetear para que el handler tome nuevo timestamp
+        Serial.println("[SIM-OTA] Iniciando simulacion de actualizacion...");
+        Serial.println("[SIM-OTA] (Hardware real: pio run -e esp32dev_ota --target upload)");
+        otaSimInicio = 0;
         estadoActual = ACTUALIZANDO_OTA;
         lcdMostrarOTA();
     }
 
-    // ── BOVEDA ───────────────────────────────────────────────────────
-    // Fuerza la detección de efecto bóveda (atasco)
-    // En hardware real: combinación HX711 alto + HC-SR04 en vacío
+    // BOVEDA → fuerza efecto bóveda (atasco)
     else if (linea == "BOVEDA") {
         Serial.println("[SIM] Forzando efecto boveda...");
         forzarBoveda = true;
     }
 
-    // ── STATUS ───────────────────────────────────────────────────────
-    // Simula comando BLE {"cmd":"status"}
+    // STATUS → muestra telemetría completa
     else if (linea == "STATUS") {
         imprimirStatus();
     }
 
     else {
-        Serial.println(F("[SERIAL] Comandos: CONFIG:n,p,f | ALIMENTO:m,k | DISPENSAR | OTA | BOVEDA | STATUS"));
+        Serial.println(F("[SERIAL] Comandos disponibles:"));
+        Serial.println(F("  CONFIG:n,p,f | ALIMENTO:m,k | DISPENSAR"));
+        Serial.println(F("  PLATILLO     | OTA          | BOVEDA | STATUS"));
     }
 }
 
-// Acumula caracteres del Serial hasta recibir un salto de línea
 void leerComandoSerial() {
     while (Serial.available()) {
         char c = (char)Serial.read();
@@ -345,14 +320,14 @@ void leerComandoSerial() {
                 procesarComandoSerial(serialBuffer);
                 serialBuffer = "";
             }
-        } else if (c >= 32) { // ignorar caracteres de control
+        } else if (c >= 32) {
             serialBuffer += c;
         }
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// NEOPIXEL — ANIMACIONES POR ESTADO (idénticas al hardware real)
+// NEOPIXEL (idéntico al hardware real)
 // ═══════════════════════════════════════════════════════════════════════
 
 void neoApagar() { anillo.clear(); anillo.show(); }
@@ -390,22 +365,19 @@ void neoParpadeoRojo() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// LCD — PANTALLAS POR ESTADO
-// La línea de estado en REPOSO incluye "[BLE:SIM]" para indicar que
-// la versión BLE fue reemplazada por Serial en esta simulación.
+// LCD (idéntico al hardware real con indicador [SIM])
 // ═══════════════════════════════════════════════════════════════════════
 
 void lcdMostrarBienvenida() {
     lcd.clear();
-    lcd.setCursor(1, 0); lcd.print("Comedero IoT v4.0");
+    lcd.setCursor(1, 0); lcd.print("Comedero IoT v4.1");
     lcd.setCursor(0, 1); lcd.print("Simulacion Wokwi");
-    lcd.setCursor(0, 2); lcd.print("BLE=Serial OTA=SIM");
+    lcd.setCursor(0, 2); lcd.print("Servo+Buzzer+Plato");
     lcd.setCursor(4, 3); lcd.print("Iniciando...");
 }
 
 void lcdMostrarReposo() {
     lcd.clear();
-    // Fila 0: estado + indicador de simulación BLE + hora NTP
     struct tm t;
     char fila0[21];
     if (getLocalTime(&t)) {
@@ -414,20 +386,14 @@ void lcdMostrarReposo() {
         snprintf(fila0, sizeof(fila0), "REPOSO[SIM]  --:--");
     }
     lcd.setCursor(0, 0); lcd.print(fila0);
-
-    // Fila 1: nombre + peso + masa actual en inventario
     char fila1[21];
     snprintf(fila1, sizeof(fila1), "%-7s%4.0fkg%4.0fg",
              perfil.nombre_perro, perfil.peso_kg, masaUltimaLectura);
     lcd.setCursor(0, 1); lcd.print(fila1);
-
-    // Fila 2: marca del alimento + densidad calórica
     char fila2[21];
     snprintf(fila2, sizeof(fila2), "%-10s%.1fk/g",
              perfil.marca_alimento, perfil.kcal_por_gramo);
     lcd.setCursor(0, 2); lcd.print(fila2);
-
-    // Fila 3: días restantes + ración por comida (Edge Computing)
     float dias = (consumoEMA > 0.1f) ? (masaUltimaLectura / consumoEMA) : 999.0f;
     int   nH   = max(perfil.num_horarios, 1);
     char  fila3[21];
@@ -439,21 +405,42 @@ void lcdMostrarReposo() {
 void lcdMostrarDispensando() {
     lcd.clear();
     lcd.setCursor(2, 0); lcd.print("> DISPENSANDO <");
+    char buf[21];
+    snprintf(buf, sizeof(buf), "Obj:%4.0fg Plat:%4.0fg",
+             masaObjetivoG, masaPlatilloActual);
+    lcd.setCursor(0, 1); lcd.print(buf);
     float dispensado = masaInicialG - masaUltimaLectura;
     if (dispensado < 0.0f) dispensado = 0.0f;
     float restante = masaObjetivoG - dispensado;
     if (restante < 0.0f) restante = 0.0f;
+    snprintf(buf, sizeof(buf), "Dispensado: %5.1fg", dispensado);
+    lcd.setCursor(0, 2); lcd.print(buf);
+    snprintf(buf, sizeof(buf), "Restante:   %5.1fg", restante);
+    lcd.setCursor(0, 3); lcd.print(buf);
+}
+
+void lcdMostrarVerificacion() {
+    lcd.clear();
+    lcd.setCursor(0, 0); lcd.print(">> Verificacion <<  ");
+    float recibido = masaPlatilloActual - masaPlatilloAntes;
+    if (recibido < 0.0f) recibido = 0.0f;
+    if (estadoVerificacion == "OK") {
+        lcd.setCursor(0, 1); lcd.print("DISPENSACION OK!    ");
+        lcd.setCursor(0, 2); lcd.print("Alimento verificado ");
+    } else {
+        lcd.setCursor(0, 1); lcd.print("NO VERIFICADA       ");
+        lcd.setCursor(0, 2); lcd.print("Posible atasco tubo ");
+    }
     char buf[21];
-    snprintf(buf, sizeof(buf), "Obj:  %6.1f g", masaObjetivoG);  lcd.setCursor(0, 1); lcd.print(buf);
-    snprintf(buf, sizeof(buf), "Disp: %6.1f g", dispensado);     lcd.setCursor(0, 2); lcd.print(buf);
-    snprintf(buf, sizeof(buf), "Rest: %6.1f g", restante);       lcd.setCursor(0, 3); lcd.print(buf);
+    snprintf(buf, sizeof(buf), "Platillo: %6.1fg", recibido);
+    lcd.setCursor(0, 3); lcd.print(buf);
 }
 
 void lcdMostrarError(const String& motivo) {
     lcd.clear();
     lcd.setCursor(0, 0); lcd.print("!! ERROR CRITICO !!");
     lcd.setCursor(0, 1); lcd.print(motivo.substring(0, 20));
-    lcd.setCursor(0, 2); lcd.print("Motor detenido");
+    lcd.setCursor(0, 2); lcd.print("Compuerta cerrada");
     lcd.setCursor(0, 3); lcd.print("Recuperando en 10s.");
 }
 
@@ -466,25 +453,42 @@ void lcdMostrarOTA() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// MOTOR — CONTROL VIA L298N + PWM (idéntico al hardware real)
+// SERVO (idéntico al hardware real — Wokwi tiene componente wokwi-servo)
 // ═══════════════════════════════════════════════════════════════════════
 
-void motorAvanzar(int vel) {
-    digitalWrite(PIN_IN1, HIGH);
-    digitalWrite(PIN_IN2, LOW);
-    ledcWrite(PWM_CANAL, vel);
+void abrirCompuerta() {
+    compuerta.write(90);
+    Serial.println("[SERVO] Compuerta abierta (90°)");
 }
 
-void motorDetener() {
-    digitalWrite(PIN_IN1, LOW);
-    digitalWrite(PIN_IN2, LOW);
-    ledcWrite(PWM_CANAL, 0);
+void cerrarCompuerta() {
+    compuerta.write(0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// SENSORES — FUSIÓN SENSORIAL HX711 + HC-SR04
-// Idéntica al hardware real. El efecto bóveda también puede forzarse
-// por Serial con el comando "BOVEDA" para la demo.
+// BUZZER + VIBRADOR
+//
+// Buzzer:   tone() funciona en Wokwi con el componente wokwi-buzzer
+// Vibrador: pin definido, digitalWrite funciona, pero Wokwi no tiene
+//           componente visual de vibrador. El código es el mismo para
+//           mantener paridad con el hardware real.
+// ═══════════════════════════════════════════════════════════════════════
+void alertaAtasco() {
+    Serial.println("[ALERTA] Activando buzzer + vibrador (vibrador sin efecto visual en Wokwi)");
+    for (int i = 0; i < 3; i++) {
+        tone(PIN_BUZZER, 1000, 200);
+        delay(400);
+    }
+    for (int i = 0; i < 3; i++) {
+        digitalWrite(PIN_VIBRADOR, HIGH);
+        delay(300);
+        digitalWrite(PIN_VIBRADOR, LOW);
+        delay(200);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SENSORES — FUSIÓN HX711 TANQUE + HC-SR04 + HX711b PLATILLO
 // ═══════════════════════════════════════════════════════════════════════
 
 float leerMasaG() {
@@ -493,6 +497,17 @@ float leerMasaG() {
         masaUltimaLectura = constrain(lectura, 0.0f, CAPACIDAD_TANQUE_G);
     }
     return masaUltimaLectura;
+}
+
+float leerMasaPlatilloG() {
+    if (balanza2.is_ready()) {
+        float lectura = (float)balanza2.read() / 20.0f;
+        // En Wokwi el segundo HX711 puede no tener slider; la simulación
+        // usa masaPlatilloActual directamente mediante el comando "PLATILLO"
+        float leido = constrain(lectura, 0.0f, CAPACIDAD_TANQUE_G);
+        if (leido > 0.0f) masaPlatilloActual = leido;
+    }
+    return masaPlatilloActual;
 }
 
 float leerDistanciaCm() {
@@ -504,7 +519,6 @@ float leerDistanciaCm() {
     return distanciaUltima;
 }
 
-// Fusión HX711 + HC-SR04. "BOVEDA" por Serial también activa esto.
 bool detectarEfectoBoveda() {
     if (forzarBoveda) {
         forzarBoveda = false;
@@ -516,26 +530,27 @@ bool detectarEfectoBoveda() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// MQTT — TELEMETRÍA REAL (idéntico al hardware real)
-// Wokwi tiene acceso a internet real, por lo que MQTT funciona.
+// MQTT (idéntico al hardware real — Wokwi tiene internet real)
 // ═══════════════════════════════════════════════════════════════════════
 
 void publicarTelemetria(const String& alerta) {
     if (!mqtt.connected()) return;
     const char* etiquetas[] = {"REPOSO", "DISPENSANDO", "ERROR", "OTA"};
     JsonDocument doc;
-    doc["estado"]         = etiquetas[(int)estadoActual];
-    doc["sim"]            = true;          // indicador de simulación
-    doc["masa_g"]         = masaUltimaLectura;
-    doc["distancia_cm"]   = distanciaUltima;
-    doc["consumo_ema_g"]  = consumoEMA;
-    doc["dias_restantes"] = (consumoEMA > 0.1f) ? (masaUltimaLectura / consumoEMA) : 999.0f;
-    doc["nombre_perro"]   = perfil.nombre_perro;
-    doc["peso_kg"]        = perfil.peso_kg;
-    doc["alimento"]       = perfil.marca_alimento;
-    doc["kcal_g"]         = perfil.kcal_por_gramo;
+    doc["estado"]          = etiquetas[(int)estadoActual];
+    doc["sim"]             = true;
+    doc["masa_g"]          = masaUltimaLectura;
+    doc["masa_platillo_g"] = masaPlatilloActual;
+    doc["verificacion"]    = estadoVerificacion.c_str();
+    doc["distancia_cm"]    = distanciaUltima;
+    doc["consumo_ema_g"]   = consumoEMA;
+    doc["dias_restantes"]  = (consumoEMA > 0.1f) ? (masaUltimaLectura / consumoEMA) : 999.0f;
+    doc["nombre_perro"]    = perfil.nombre_perro;
+    doc["peso_kg"]         = perfil.peso_kg;
+    doc["alimento"]        = perfil.marca_alimento;
+    doc["kcal_g"]          = perfil.kcal_por_gramo;
     if (alerta.length() > 0) doc["alerta"] = alerta;
-    char buf[512];
+    char buf[600];
     serializeJson(doc, buf);
     mqtt.publish(TOPIC_TELEM, buf);
 }
@@ -545,16 +560,11 @@ void onMensajeMQTT(char* topic, byte* payload, unsigned int length) {
     msg.reserve(length);
     for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
     Serial.println("[MQTT CMD] " + msg);
-
     JsonDocument doc;
     if (deserializeJson(doc, msg)) return;
     String tipo = doc["tipo"] | "";
     if (tipo == "dispensar_ahora" && estadoActual == REPOSO && perfil.configurado) {
-        int nH             = max(perfil.num_horarios, 1);
-        masaObjetivoG      = calcularRacion(1.0f / nH);
-        masaInicialG       = masaUltimaLectura;
-        inicioDispensacion = millis();
-        estadoActual       = DISPENSANDO;
+        iniciarDispensacion();
     }
 }
 
@@ -567,12 +577,12 @@ void conectarMQTT() {
     mqtt.setCallback(onMensajeMQTT);
     if (mqtt.connect(cid)) {
         mqtt.subscribe(TOPIC_CMD);
-        Serial.println("[MQTT] Conectado al broker (simulacion)");
+        Serial.println("[MQTT] Conectado al broker");
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// HORARIO AUTOMÁTICO (idéntico al hardware real)
+// HORARIO AUTOMÁTICO
 // ═══════════════════════════════════════════════════════════════════════
 bool esHoraDeDispensar() {
     if (!perfil.configurado || perfil.num_horarios == 0) return false;
@@ -589,16 +599,33 @@ bool esHoraDeDispensar() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// HELPER — INICIAR DISPENSACIÓN
+// ═══════════════════════════════════════════════════════════════════════
+void iniciarDispensacion() {
+    int nH             = max(perfil.num_horarios, 1);
+    masaObjetivoG      = calcularRacion(1.0f / nH);
+    masaInicialG       = masaUltimaLectura;
+    masaPlatilloAntes  = masaPlatilloActual;  // snapshot antes de abrir
+    estadoVerificacion = "PENDIENTE";
+    inicioDispensacion = millis();
+    abrirCompuerta();
+    estadoActual       = DISPENSANDO;
+    Serial.printf("[FSM] Dispensacion: %.1fg | platillo base=%.1fg\n",
+                  masaObjetivoG, masaPlatilloAntes);
+    Serial.println("[SIM] Baja el slider HX711 del tanque, luego escribe 'PLATILLO'");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // FSM — MANEJADORES DE ESTADO
 // ═══════════════════════════════════════════════════════════════════════
 
 void handleReposo() {
-    motorDetener();
     leerMasaG();
     leerDistanciaCm();
 
     if (detectarEfectoBoveda()) {
         Serial.println("[FSM] Efecto boveda → ERROR");
+        alertaAtasco();
         publicarTelemetria("EFECTO_BOVEDA");
         lcdMostrarError("Atasco detectado");
         estadoActual = ERROR;
@@ -607,11 +634,7 @@ void handleReposo() {
 
     if (esHoraDeDispensar()) {
         Serial.println("[FSM] Horario → DISPENSANDO");
-        int nH             = max(perfil.num_horarios, 1);
-        masaObjetivoG      = calcularRacion(1.0f / nH);
-        masaInicialG       = masaUltimaLectura;
-        inicioDispensacion = millis();
-        estadoActual       = DISPENSANDO;
+        iniciarDispensacion();
         return;
     }
 
@@ -628,9 +651,11 @@ void handleReposo() {
 void handleDispensando() {
     leerMasaG();
     leerDistanciaCm();
+    leerMasaPlatilloG();
 
     if (detectarEfectoBoveda()) {
-        motorDetener();
+        cerrarCompuerta();
+        alertaAtasco();
         Serial.println("[FSM] Efecto boveda durante dispensacion → ERROR");
         publicarTelemetria("EFECTO_BOVEDA_CRITICO");
         lcdMostrarError("Atasco critico!");
@@ -642,24 +667,36 @@ void handleDispensando() {
     if (dispensado < 0.0f) dispensado = 0.0f;
 
     if (dispensado >= masaObjetivoG) {
-        motorDetener();
+        cerrarCompuerta();
         actualizarEMA(dispensado);
-        publicarTelemetria("DISPENSACION_OK");
-        Serial.printf("[FSM] Dispensacion completa: %.1fg\n", dispensado);
+
+        float recibido = masaPlatilloActual - masaPlatilloAntes;
+        if (recibido >= masaObjetivoG * UMBRAL_VERIF_PCT) {
+            estadoVerificacion = "OK";
+            Serial.printf("[FSM] Verificacion OK: platillo recibio %.1fg\n", recibido);
+            publicarTelemetria("DISPENSACION_VERIFICADA");
+        } else {
+            estadoVerificacion = "NO_VERIFICADA";
+            Serial.printf("[FSM] Verificacion FALLA: platillo %.1fg de %.1fg\n",
+                          recibido > 0.0f ? recibido : 0.0f, masaObjetivoG);
+            Serial.println("[SIM] Escribe 'PLATILLO' para simular que alimento llego al platillo");
+            publicarTelemetria("DISPENSACION_NO_VERIFICADA");
+        }
+
+        lcdMostrarVerificacion();
+        delay(2000);
         estadoActual = REPOSO;
         return;
     }
 
     if (millis() - inicioDispensacion > TIMEOUT_MOTOR_MS) {
-        motorDetener();
-        Serial.println("[FSM] Timeout → ERROR");
-        publicarTelemetria("TIMEOUT_MOTOR");
-        lcdMostrarError("Timeout dispensador");
+        cerrarCompuerta();
+        Serial.println("[FSM] Timeout compuerta → ERROR");
+        publicarTelemetria("TIMEOUT_SERVO");
+        lcdMostrarError("Timeout compuerta");
         estadoActual = ERROR;
         return;
     }
-
-    motorAvanzar(180);
 
     if (millis() - ultimaAnimacion > 80) {
         ultimaAnimacion = millis();
@@ -672,15 +709,23 @@ void handleDispensando() {
 }
 
 void handleError() {
-    motorDetener();
+    cerrarCompuerta();
+
     if (millis() - ultimaAnimacion > 300) {
         ultimaAnimacion = millis();
         neoParpadeoRojo();
     }
+
+    if (millis() - ultimaAlerta > 5000) {
+        ultimaAlerta = millis();
+        alertaAtasco();
+    }
+
     static unsigned long tEntrada = 0;
     if (tEntrada == 0) tEntrada = millis();
     if (millis() - tEntrada > 10000) {
         tEntrada     = 0;
+        ultimaAlerta = 0;
         estadoActual = REPOSO;
         neoApagar();
         lcd.clear();
@@ -688,14 +733,7 @@ void handleError() {
     }
 }
 
-// ───────────────────────────────────────────────────────────────────────
-// OTA SIMULADO
-//
-// En hardware real: ArduinoOTA.handle() recibe el firmware por red.
-// En Wokwi: animamos una barra de progreso durante 5 segundos con
-//           millis(), actualizando LCD (porcentaje) y NeoPixel (LEDs
-//           azules de izquierda a derecha).
-// ───────────────────────────────────────────────────────────────────────
+// OTA simulado con millis() — barra de progreso azul 5 segundos
 void handleActualizandoOTA() {
     if (otaSimInicio == 0) {
         otaSimInicio = millis();
@@ -705,14 +743,12 @@ void handleActualizandoOTA() {
     unsigned long elapsed = millis() - otaSimInicio;
     int pct = (int)min((elapsed * 100UL) / OTA_SIM_DURACION_MS, 100UL);
 
-    // Actualizar NeoPixel: barra azul que crece de izquierda a derecha
     int ledsActivos = (pct * NUM_PIXELS) / 100;
     anillo.clear();
     for (int i = 0; i < ledsActivos && i < NUM_PIXELS; i++)
         anillo.setPixelColor(i, anillo.Color(0, 0, 200));
     anillo.show();
 
-    // Actualizar porcentaje en LCD línea 2 cada 250ms
     static unsigned long ultimoOtaLCD = 0;
     if (millis() - ultimoOtaLCD > 250) {
         ultimoOtaLCD = millis();
@@ -723,10 +759,9 @@ void handleActualizandoOTA() {
         Serial.printf("[SIM-OTA] %d%%\r", pct);
     }
 
-    // Completado
     if (pct >= 100) {
         Serial.println("\n[SIM-OTA] Actualizacion completada! → v4.1");
-        neoColorSolido(0, 200, 0); // verde = éxito
+        neoColorSolido(0, 200, 0);
         lcd.clear();
         lcd.setCursor(1, 0); lcd.print("  OTA completado!  ");
         lcd.setCursor(1, 1); lcd.print(" Firmware v4.1     ");
@@ -747,26 +782,24 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.println(F("\n╔════════════════════════════╗"));
-    Serial.println(F("║  Comedero IoT v4.0-SIM     ║"));
-    Serial.println(F("║  Wokwi: BLE=Serial OTA=SIM ║"));
+    Serial.println(F("║  Comedero IoT v4.1-SIM     ║"));
+    Serial.println(F("║  Servo + Buzzer + Platillo  ║"));
     Serial.println(F("╚════════════════════════════╝"));
-    Serial.println(F("\nComandos Serial disponibles:"));
-    Serial.println(F("  CONFIG:nombre,peso,factor   → perfil del perro"));
-    Serial.println(F("  ALIMENTO:marca,kcal_g       → datos del alimento"));
-    Serial.println(F("  DISPENSAR                   → dispensar ahora"));
-    Serial.println(F("  OTA                         → simular update"));
-    Serial.println(F("  BOVEDA                      → forzar atasco"));
-    Serial.println(F("  STATUS                      → ver telemetria\n"));
+    Serial.println(F("\nComandos Serial:"));
+    Serial.println(F("  CONFIG:n,p,f | ALIMENTO:m,k"));
+    Serial.println(F("  DISPENSAR    | PLATILLO"));
+    Serial.println(F("  OTA          | BOVEDA | STATUS\n"));
 
     // ── Pines ─────────────────────────────────────────────────────────
-    pinMode(PIN_TRIG, OUTPUT);
-    pinMode(PIN_ECHO, INPUT);
-    pinMode(PIN_IN1,  OUTPUT);
-    pinMode(PIN_IN2,  OUTPUT);
+    pinMode(PIN_TRIG,     OUTPUT);
+    pinMode(PIN_ECHO,     INPUT);
+    pinMode(PIN_BUZZER,   OUTPUT);
+    pinMode(PIN_VIBRADOR, OUTPUT);  // definido aunque Wokwi no lo renderiza
 
-    // ── PWM motor ─────────────────────────────────────────────────────
-    ledcSetup(PWM_CANAL, PWM_FREQ, PWM_RES);
-    ledcAttachPin(PIN_ENA, PWM_CANAL);
+    // ── Servo compuerta ───────────────────────────────────────────────
+    compuerta.setPeriodHertz(50);
+    compuerta.attach(PIN_SERVO, 500, 2400);
+    cerrarCompuerta();
 
     // ── LCD I2C ───────────────────────────────────────────────────────
     Wire.begin(PIN_SDA, PIN_SCL);
@@ -780,19 +813,16 @@ void setup() {
     neoColorSolido(0, 50, 0);
     delay(800);
 
-    // ── HX711 ─────────────────────────────────────────────────────────
+    // ── HX711 tanque + HX711b platillo ───────────────────────────────
     balanza.begin(PIN_HX711_DT, PIN_HX711_SCK);
-    motorDetener();
+    balanza2.begin(PIN_HX711_DT2, PIN_HX711_SCK2);
 
-    // ── Perfil demo hardcodeado (simula NVS cargado) ──────────────────
-    // En hardware real esto viene de Preferences (NVS) o de BLE.
-    // En Wokwi usamos valores fijos para la demo.
-    Serial.printf("[SIM] Perfil demo: %s %.1fkg factor=%.1f | %s %.2fkcal/g\n",
-                  perfil.nombre_perro, perfil.peso_kg, perfil.factor_rer,
+    Serial.printf("[SIM] Perfil demo: %s %.1fkg | %s %.2fkcal/g\n",
+                  perfil.nombre_perro, perfil.peso_kg,
                   perfil.marca_alimento, perfil.kcal_por_gramo);
 
     // ── WiFi Wokwi-GUEST ──────────────────────────────────────────────
-    Serial.printf("[WiFi] Conectando a Wokwi-GUEST...");
+    Serial.print("[WiFi] Conectando a Wokwi-GUEST");
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     int intentos = 0;
@@ -805,7 +835,7 @@ void setup() {
         delay(2000);
         conectarMQTT();
     } else {
-        Serial.println(F("\n[WiFi] Sin conexion — MQTT y NTP desactivados"));
+        Serial.println(F("\n[WiFi] Sin conexion"));
     }
 
     Serial.println(F("[SETUP] Sistema listo — escribe comandos en Serial Monitor\n"));
@@ -816,14 +846,11 @@ void setup() {
 // LOOP
 // ═══════════════════════════════════════════════════════════════════════
 void loop() {
-    // Leer comandos Serial (reemplazo de BLE)
     leerComandoSerial();
 
-    // MQTT reconexión y loop
     if (!mqtt.connected()) conectarMQTT();
     mqtt.loop();
 
-    // FSM
     switch (estadoActual) {
         case REPOSO:           handleReposo();          break;
         case DISPENSANDO:      handleDispensando();     break;
@@ -831,7 +858,6 @@ void loop() {
         case ACTUALIZANDO_OTA: handleActualizandoOTA(); break;
     }
 
-    // Telemetría periódica cada 10 segundos
     if (millis() - ultimoEnvioTelem > 10000) {
         ultimoEnvioTelem = millis();
         publicarTelemetria();
