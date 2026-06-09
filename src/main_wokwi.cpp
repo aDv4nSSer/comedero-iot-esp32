@@ -145,6 +145,7 @@ int           pixelAnimado         = 0;
 // Variables exclusivas de simulación
 bool          forzarBoveda  = false;
 unsigned long otaSimInicio  = 0;
+unsigned long demoInicio    = 0;
 String        serialBuffer  = "";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -733,15 +734,15 @@ void handleError() {
     }
 }
 
-// OTA simulado con millis() — barra de progreso azul 5 segundos
+// OTA simulado con millis() — barra de progreso azul 8 segundos
 void handleActualizandoOTA() {
     if (otaSimInicio == 0) {
         otaSimInicio = millis();
-        Serial.println("[SIM-OTA] Descargando firmware... (5 segundos)");
+        Serial.println("[SIM-OTA] Descargando firmware... (8 segundos)");
     }
 
     unsigned long elapsed = millis() - otaSimInicio;
-    int pct = (int)min((elapsed * 100UL) / OTA_SIM_DURACION_MS, 100UL);
+    int pct = (int)min((elapsed * 100UL) / 8000UL, 100UL);
 
     int ledsActivos = (pct * NUM_PIXELS) / 100;
     anillo.clear();
@@ -760,18 +761,96 @@ void handleActualizandoOTA() {
     }
 
     if (pct >= 100) {
-        Serial.println("\n[SIM-OTA] Actualizacion completada! → v4.1");
+        Serial.println("\n[SIM-OTA] Actualizacion completada! → v4.2");
         neoColorSolido(0, 200, 0);
         lcd.clear();
-        lcd.setCursor(1, 0); lcd.print("  OTA completado!  ");
-        lcd.setCursor(1, 1); lcd.print(" Firmware v4.1     ");
-        lcd.setCursor(1, 2); lcd.print(" (simulacion)      ");
-        lcd.setCursor(1, 3); lcd.print("  Volviendo...     ");
+        lcd.setCursor(0, 0); lcd.print("  OTA completado!  ");
+        lcd.setCursor(0, 1); lcd.print("  Firmware v4.2    ");
+        lcd.setCursor(0, 2); lcd.print("  (simulacion)     ");
+        lcd.setCursor(0, 3); lcd.print("  Volviendo...     ");
         delay(2000);
         otaSimInicio = 0;
         estadoActual = REPOSO;
         lcd.clear();
         neoApagar();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DEMO AUTOMÁTICA — ciclo 95s para presentación
+// ═══════════════════════════════════════════════════════════════════════
+void ejecutarDemo() {
+    if (demoInicio == 0) demoInicio = millis();
+    unsigned long t = millis() - demoInicio;
+
+    // FASE 1 — 10s: Simula BLE cambio perfil Senior
+    if (t >= 10000 && t < 10100) {
+        strncpy(perfil.nombre_perro, "Rex", 31);
+        perfil.peso_kg    = 18.0;
+        perfil.factor_rer = 70.0;
+        perfil.configurado = true;
+        Serial.println(">>> [BLE] Perfil: Rex Senior 18kg factor=70");
+    }
+
+    // FASE 2 — 20s: Simula BLE cambio alimento
+    if (t >= 20000 && t < 20100) {
+        strncpy(perfil.marca_alimento, "Hills Senior", 31);
+        perfil.kcal_por_gramo = 3.2;
+        Serial.println(">>> [BLE] Alimento: Hills Senior 3.2kcal/g");
+    }
+
+    // FASE 3 — 30s: Auto dispensar
+    if (t >= 30000 && t < 30100) {
+        if (estadoActual == REPOSO && perfil.configurado) {
+            Serial.println(">>> [AUTO] Dispensacion iniciada por horario");
+            iniciarDispensacion();
+        }
+    }
+
+    // FASE 4 — 30-45s: Bajar masa tanque gradualmente
+    if (t >= 30000 && t < 45000 && estadoActual == DISPENSANDO) {
+        static unsigned long ultimaBajada = 0;
+        if (millis() - ultimaBajada > 400) {
+            ultimaBajada = millis();
+            masaUltimaLectura = max(0.0f, masaUltimaLectura - 6.0f);
+        }
+    }
+
+    // FASE 5 — 45s: Platillo recibe alimento
+    if (t >= 45000 && t < 45100) {
+        masaPlatilloActual += 85.0;
+        Serial.println(">>> [SENSOR] Platillo: +85g recibidos");
+    }
+
+    // FASE 6 — 65s: Efecto Boveda (fusion sensorial)
+    if (t >= 65000 && t < 65100) {
+        if (estadoActual == REPOSO) {
+            distanciaUltima   = 25.0;
+            masaUltimaLectura = 400.0;
+            Serial.println(">>> [FUSION] HC-SR04=25cm + HX711=400g = BOVEDA!");
+        }
+    }
+
+    // FASE 7 — 80s: Simula OTA
+    if (t >= 80000 && t < 80100) {
+        if (estadoActual == REPOSO || estadoActual == ERROR) {
+            Serial.println(">>> [OTA] Nueva version disponible, actualizando...");
+            estadoActual = ACTUALIZANDO_OTA;
+            otaSimInicio = millis();
+            lcdMostrarOTA();
+        }
+    }
+
+    // FASE 8 — 95s: Reset y nuevo ciclo
+    if (t >= 95000) {
+        demoInicio         = millis();
+        masaUltimaLectura  = 750.0;
+        masaPlatilloActual = 0.0;
+        distanciaUltima    = 5.0;
+        estadoActual       = REPOSO;
+        lcd.clear();
+        Serial.println(">>> [DEMO] Ciclo completo - reiniciando en 3s");
+        delay(3000);
     }
 }
 
@@ -850,6 +929,8 @@ void loop() {
 
     if (!mqtt.connected()) conectarMQTT();
     mqtt.loop();
+
+    ejecutarDemo();
 
     switch (estadoActual) {
         case REPOSO:           handleReposo();          break;
