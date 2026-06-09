@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "author": "Antonio - UBO",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-c-v4", "id": "esp",   "top": 20,   "left": 0,    "attrs": {} },
+
+    { "type": "wokwi-hx711",    "id": "hx711",  "top": -180, "left": 290,  "attrs": {} },
+    { "type": "wokwi-hc-sr04",  "id": "ultra",  "top": -190, "left": -290, "attrs": { "distance": "5" } },
+
+    { "type": "wokwi-lcd2004",  "id": "lcd",    "top": 230,  "left": -290, "attrs": { "pins": "i2c" } },
+    { "type": "wokwi-led-ring", "id": "ring",   "top": 200,  "left": 295,  "attrs": { "pixels": "12" } },
+
+    { "type": "wokwi-l298n",    "id": "l298",   "top": 310,  "left": 100,  "attrs": {} },
+    { "type": "wokwi-dc-motor", "id": "motor",  "top": 390,  "left": -50,  "attrs": {} }
+  ],
+  "connections": [
+    ["esp:GND.1", "hx711:GND",  "black",  []],
+    ["esp:3V3",   "hx711:VCC",  "red",    []],
+    ["esp:16",    "hx711:DT",   "green",  []],
+    ["esp:17",    "hx711:SCK",  "yellow", []],
+
+    ["esp:GND.2", "ultra:GND",  "black",  []],
+    ["esp:5V",    "ultra:VCC",  "red",    []],
+    ["esp:5",     "ultra:TRIG", "orange", []],
+    ["esp:18",    "ultra:ECHO", "purple", []],
+
+    ["esp:21",    "lcd:SDA",    "cyan",   []],
+    ["esp:22",    "lcd:SCL",    "blue",   []],
+    ["esp:5V",    "lcd:VCC",    "red",    []],
+    ["esp:GND.2", "lcd:GND",    "black",  []],
+
+    ["esp:19",    "ring:DIN",   "violet", []],
+    ["esp:5V",    "ring:VCC",   "red",    []],
+    ["esp:GND.3", "ring:GND",   "black",  []],
+
+    ["esp:25",    "l298:ENA",   "white",  []],
+    ["esp:26",    "l298:IN1",   "gray",   []],
+    ["esp:27",    "l298:IN2",   "brown",  []],
+    ["esp:5V",    "l298:+12V",  "red",    []],
+    ["esp:GND.3", "l298:GND",   "black",  []],
+    ["l298:OUT1", "motor:1",    "green",  []],
+    ["l298:OUT2", "motor:2",    "yellow", []]
+  ],
+  "dependencies": {}
+}
