@@ -54,8 +54,12 @@ const char* WIFI_PASS = "";
 // ─────────────────────────────────────────────────────────────────────
 const char* MQTT_BROKER = "broker.hivemq.com";
 const int   MQTT_PORT   = 1883;
-const char* TOPIC_TELEM = "comedero/telemetria";
-const char* TOPIC_CMD   = "comedero/comando";
+const char* TOPIC_TELEM   = "comedero/telemetria";
+const char* TOPIC_CMD     = "comedero/comando";
+const char* TOPIC_ALERTAS = "comedero/alertas";
+const char* TOPIC_DISPENS = "comedero/dispensaciones";
+const char* TOPIC_OTA_EVT = "comedero/ota";
+const char* TOPIC_PERFIL  = "comedero/perfil";
 const char* NTP_SERVER   = "pool.ntp.org";
 const long  GMT_OFFSET   = -3 * 3600;
 const int   DAYLIGHT_SEC = 0;
@@ -95,6 +99,12 @@ const unsigned long OTA_SIM_DURACION_MS = 5000;
 // ─────────────────────────────────────────────────────────────────────
 enum Estado { REPOSO, DISPENSANDO, ERROR, ACTUALIZANDO_OTA };
 Estado estadoActual = REPOSO;
+
+enum DemoFase {
+    DFASE_REPOSO, DFASE_BLE_PERFIL, DFASE_BLE_ALIMENTO,
+    DFASE_DISPENSANDO, DFASE_VERIFICACION, DFASE_BOVEDA, DFASE_OTA
+};
+DemoFase demoFase = DFASE_REPOSO;
 
 // ─────────────────────────────────────────────────────────────────────
 // OBJETOS DE HARDWARE
@@ -166,6 +176,10 @@ void  abrirCompuerta();
 void  cerrarCompuerta();
 void  alertaAtasco();
 void  publicarTelemetria(const String& alerta = "");
+void  publicarAlerta(const String& tipoAlerta);
+void  publicarDispensacion(float dispensado, const String& verif);
+void  publicarOTA(const String& otaEstado);
+void  publicarPerfil();
 float leerMasaG();
 float leerMasaPlatilloG();
 float calcularRacion(float porcentajeHorario = 1.0f);
@@ -237,6 +251,7 @@ void procesarComandoSerial(const String& linea) {
                 Serial.printf("[SIM-BLE] Perfil: %s %.1fkg factor=%.1f → racion=%.1fg\n",
                               perfil.nombre_perro, perfil.peso_kg,
                               perfil.factor_rer, calcularRacion(1.0f / nH));
+                publicarPerfil();
                 ultimaActualizLCD = 0;
             } else {
                 Serial.println("[SIM-BLE] ERROR: peso y factor > 0");
@@ -258,6 +273,7 @@ void procesarComandoSerial(const String& linea) {
                 perfil.kcal_por_gramo = kcal;
                 Serial.printf("[SIM-BLE] Alimento: %s %.2f kcal/g\n",
                               perfil.marca_alimento, perfil.kcal_por_gramo);
+                publicarPerfil();
                 ultimaActualizLCD = 0;
             }
         } else {
@@ -290,7 +306,10 @@ void procesarComandoSerial(const String& linea) {
         Serial.println("[SIM-OTA] Iniciando simulacion de actualizacion...");
         Serial.println("[SIM-OTA] (Hardware real: pio run -e esp32dev_ota --target upload)");
         otaSimInicio = 0;
+        demoFase     = DFASE_OTA;
         estadoActual = ACTUALIZANDO_OTA;
+        publicarOTA("INICIANDO");
+        publicarTelemetria("OTA_INICIADO");
         lcdMostrarOTA();
     }
 
@@ -536,24 +555,122 @@ bool detectarEfectoBoveda() {
 
 void publicarTelemetria(const String& alerta) {
     if (!mqtt.connected()) return;
-    const char* etiquetas[] = {"REPOSO", "DISPENSANDO", "ERROR", "OTA"};
+    const char* etiquetas[]   = {"REPOSO", "DISPENSANDO", "ERROR", "OTA"};
+    const char* dfaseLabels[] = {"REPOSO", "BLE_PERFIL", "BLE_ALIMENTO",
+                                  "DISPENSANDO", "VERIFICACION", "BOVEDA", "OTA"};
+    const char* tipo = (perfil.factor_rer <= 80.0f)  ? "Senior" :
+                       (perfil.factor_rer <= 110.0f) ? "Adulto" : "Cachorro";
+
+    float racionG  = calcularRacion(1.0f / max(perfil.num_horarios, 1));
+    float rerKcal  = perfil.factor_rer * powf(perfil.peso_kg, 0.75f);
+    float nivelPct = (masaUltimaLectura / CAPACIDAD_TANQUE_G) * 100.0f;
+    float dias     = (consumoEMA > 0.1f) ? (masaUltimaLectura / consumoEMA) : 999.0f;
+
     JsonDocument doc;
-    doc["estado"]          = etiquetas[(int)estadoActual];
-    doc["sim"]             = true;
-    doc["masa_g"]          = masaUltimaLectura;
-    doc["masa_platillo_g"] = masaPlatilloActual;
-    doc["verificacion"]    = estadoVerificacion.c_str();
-    doc["distancia_cm"]    = distanciaUltima;
-    doc["consumo_ema_g"]   = consumoEMA;
-    doc["dias_restantes"]  = (consumoEMA > 0.1f) ? (masaUltimaLectura / consumoEMA) : 999.0f;
-    doc["nombre_perro"]    = perfil.nombre_perro;
-    doc["peso_kg"]         = perfil.peso_kg;
-    doc["alimento"]        = perfil.marca_alimento;
-    doc["kcal_g"]          = perfil.kcal_por_gramo;
-    if (alerta.length() > 0) doc["alerta"] = alerta;
-    char buf[600];
+    doc["v"]         = "4.1-sim";
+    doc["estado"]    = etiquetas[(int)estadoActual];
+    doc["demo_fase"] = dfaseLabels[(int)demoFase];
+
+    JsonObject perro = doc["perro"].to<JsonObject>();
+    perro["nombre"]     = perfil.nombre_perro;
+    perro["peso_kg"]    = perfil.peso_kg;
+    perro["factor_rer"] = perfil.factor_rer;
+    perro["tipo"]       = tipo;
+
+    JsonObject alim = doc["alimento"].to<JsonObject>();
+    alim["marca"]  = perfil.marca_alimento;
+    alim["kcal_g"] = perfil.kcal_por_gramo;
+
+    JsonObject tanque = doc["tanque"].to<JsonObject>();
+    tanque["masa_g"]       = masaUltimaLectura;
+    tanque["distancia_cm"] = distanciaUltima;
+    tanque["nivel_pct"]    = nivelPct;
+
+    JsonObject platillo = doc["platillo"].to<JsonObject>();
+    platillo["masa_g"]       = masaPlatilloActual;
+    platillo["verificacion"] = estadoVerificacion.c_str();
+
+    JsonObject nutricion = doc["nutricion"].to<JsonObject>();
+    nutricion["racion_g"]      = racionG;
+    nutricion["rer_kcal"]      = rerKcal;
+    nutricion["dias_restantes"] = (dias > 999.0f ? 999.0f : dias);
+    nutricion["consumo_ema_g"] = consumoEMA;
+
+    JsonObject sistema = doc["sistema"].to<JsonObject>();
+    sistema["ble"]      = "SIM";
+    sistema["ota"]      = (estadoActual == ACTUALIZANDO_OTA) ? "ACTUALIZANDO" : "LISTO";
+    sistema["mqtt"]     = "OK";
+    sistema["uptime_s"] = (unsigned long)(millis() / 1000);
+
+    doc["alerta"] = (alerta.length() > 0) ? alerta : "NINGUNA";
+
+    char buf[1024];
     serializeJson(doc, buf);
     mqtt.publish(TOPIC_TELEM, buf);
+}
+
+void publicarAlerta(const String& tipoAlerta) {
+    if (!mqtt.connected()) return;
+    const char* etiquetas[] = {"REPOSO", "DISPENSANDO", "ERROR", "OTA"};
+    JsonDocument doc;
+    doc["alerta"]   = tipoAlerta;
+    doc["estado"]   = etiquetas[(int)estadoActual];
+    doc["masa_g"]   = masaUltimaLectura;
+    doc["dist_cm"]  = distanciaUltima;
+    doc["uptime_s"] = (unsigned long)(millis() / 1000);
+    char buf[256];
+    serializeJson(doc, buf);
+    mqtt.publish(TOPIC_ALERTAS, buf);
+    Serial.printf("[MQTT] Alerta → comedero/alertas: %s\n", tipoAlerta.c_str());
+}
+
+void publicarDispensacion(float dispensado, const String& verif) {
+    if (!mqtt.connected()) return;
+    JsonDocument doc;
+    doc["perro"]        = perfil.nombre_perro;
+    doc["dispensado_g"] = dispensado;
+    doc["objetivo_g"]   = masaObjetivoG;
+    doc["verificacion"] = verif;
+    doc["platillo_g"]   = masaPlatilloActual;
+    doc["rer_kcal"]     = perfil.factor_rer * powf(perfil.peso_kg, 0.75f);
+    doc["uptime_s"]     = (unsigned long)(millis() / 1000);
+    char buf[256];
+    serializeJson(doc, buf);
+    mqtt.publish(TOPIC_DISPENS, buf);
+    Serial.printf("[MQTT] Dispensacion → comedero/dispensaciones: %.1fg %s\n",
+                  dispensado, verif.c_str());
+}
+
+void publicarOTA(const String& otaEstado) {
+    if (!mqtt.connected()) return;
+    JsonDocument doc;
+    doc["estado"]   = otaEstado;
+    doc["version"]  = "4.1-sim";
+    doc["uptime_s"] = (unsigned long)(millis() / 1000);
+    char buf[128];
+    serializeJson(doc, buf);
+    mqtt.publish(TOPIC_OTA_EVT, buf);
+    Serial.printf("[MQTT] OTA → comedero/ota: %s\n", otaEstado.c_str());
+}
+
+void publicarPerfil() {
+    if (!mqtt.connected()) return;
+    const char* tipo = (perfil.factor_rer <= 80.0f)  ? "Senior" :
+                       (perfil.factor_rer <= 110.0f) ? "Adulto" : "Cachorro";
+    JsonDocument doc;
+    doc["nombre"]     = perfil.nombre_perro;
+    doc["peso_kg"]    = perfil.peso_kg;
+    doc["factor_rer"] = perfil.factor_rer;
+    doc["tipo"]       = tipo;
+    doc["alimento"]   = perfil.marca_alimento;
+    doc["kcal_g"]     = perfil.kcal_por_gramo;
+    doc["racion_g"]   = calcularRacion(1.0f / max(perfil.num_horarios, 1));
+    doc["uptime_s"]   = (unsigned long)(millis() / 1000);
+    char buf[256];
+    serializeJson(doc, buf);
+    mqtt.publish(TOPIC_PERFIL, buf);
+    Serial.printf("[MQTT] Perfil → comedero/perfil: %s %.1fkg %s\n",
+                  perfil.nombre_perro, perfil.peso_kg, tipo);
 }
 
 void onMensajeMQTT(char* topic, byte* payload, unsigned int length) {
@@ -627,6 +744,8 @@ void handleReposo() {
     if (detectarEfectoBoveda()) {
         Serial.println("[FSM] Efecto boveda → ERROR");
         alertaAtasco();
+        demoFase = DFASE_BOVEDA;
+        publicarAlerta("EFECTO_BOVEDA");
         publicarTelemetria("EFECTO_BOVEDA");
         lcdMostrarError("Atasco detectado");
         estadoActual = ERROR;
@@ -658,6 +777,8 @@ void handleDispensando() {
         cerrarCompuerta();
         alertaAtasco();
         Serial.println("[FSM] Efecto boveda durante dispensacion → ERROR");
+        demoFase = DFASE_BOVEDA;
+        publicarAlerta("EFECTO_BOVEDA_CRITICO");
         publicarTelemetria("EFECTO_BOVEDA_CRITICO");
         lcdMostrarError("Atasco critico!");
         estadoActual = ERROR;
@@ -675,12 +796,16 @@ void handleDispensando() {
         if (recibido >= masaObjetivoG * UMBRAL_VERIF_PCT) {
             estadoVerificacion = "OK";
             Serial.printf("[FSM] Verificacion OK: platillo recibio %.1fg\n", recibido);
-            publicarTelemetria("DISPENSACION_VERIFICADA");
+            demoFase = DFASE_VERIFICACION;
+            publicarDispensacion(dispensado, estadoVerificacion);
+            publicarTelemetria("DISPENSACION_OK");
         } else {
             estadoVerificacion = "NO_VERIFICADA";
             Serial.printf("[FSM] Verificacion FALLA: platillo %.1fg de %.1fg\n",
                           recibido > 0.0f ? recibido : 0.0f, masaObjetivoG);
             Serial.println("[SIM] Escribe 'PLATILLO' para simular que alimento llego al platillo");
+            demoFase = DFASE_VERIFICACION;
+            publicarDispensacion(dispensado, estadoVerificacion);
             publicarTelemetria("DISPENSACION_NO_VERIFICADA");
         }
 
@@ -762,6 +887,8 @@ void handleActualizandoOTA() {
 
     if (pct >= 100) {
         Serial.println("\n[SIM-OTA] Actualizacion completada! → v4.2");
+        publicarOTA("COMPLETADO");
+        publicarTelemetria("OTA_COMPLETADO");
         neoColorSolido(0, 200, 0);
         lcd.clear();
         lcd.setCursor(0, 0); lcd.print("  OTA completado!  ");
@@ -770,6 +897,7 @@ void handleActualizandoOTA() {
         lcd.setCursor(0, 3); lcd.print("  Volviendo...     ");
         delay(2000);
         otaSimInicio = 0;
+        demoFase     = DFASE_REPOSO;
         estadoActual = REPOSO;
         lcd.clear();
         neoApagar();
@@ -789,19 +917,24 @@ void ejecutarDemo() {
         perfil.peso_kg    = 18.0;
         perfil.factor_rer = 70.0;
         perfil.configurado = true;
+        demoFase = DFASE_BLE_PERFIL;
         Serial.println(">>> [BLE] Perfil: Rex Senior 18kg factor=70");
+        publicarPerfil();
     }
 
     // FASE 2 — 20s: Simula BLE cambio alimento
     if (t >= 20000 && t < 20100) {
         strncpy(perfil.marca_alimento, "Hills Senior", 31);
         perfil.kcal_por_gramo = 3.2;
+        demoFase = DFASE_BLE_ALIMENTO;
         Serial.println(">>> [BLE] Alimento: Hills Senior 3.2kcal/g");
+        publicarPerfil();
     }
 
     // FASE 3 — 30s: Auto dispensar
     if (t >= 30000 && t < 30100) {
         if (estadoActual == REPOSO && perfil.configurado) {
+            demoFase = DFASE_DISPENSANDO;
             Serial.println(">>> [AUTO] Dispensacion iniciada por horario");
             iniciarDispensacion();
         }
@@ -819,6 +952,7 @@ void ejecutarDemo() {
     // FASE 5 — 45s: Platillo recibe alimento
     if (t >= 45000 && t < 45100) {
         masaPlatilloActual += 85.0;
+        demoFase = DFASE_VERIFICACION;
         Serial.println(">>> [SENSOR] Platillo: +85g recibidos");
     }
 
@@ -827,6 +961,7 @@ void ejecutarDemo() {
         if (estadoActual == REPOSO) {
             distanciaUltima   = 25.0;
             masaUltimaLectura = 400.0;
+            demoFase = DFASE_BOVEDA;
             Serial.println(">>> [FUSION] HC-SR04=25cm + HX711=400g = BOVEDA!");
         }
     }
@@ -834,9 +969,12 @@ void ejecutarDemo() {
     // FASE 7 — 80s: Simula OTA
     if (t >= 80000 && t < 80100) {
         if (estadoActual == REPOSO || estadoActual == ERROR) {
+            demoFase     = DFASE_OTA;
             Serial.println(">>> [OTA] Nueva version disponible, actualizando...");
             estadoActual = ACTUALIZANDO_OTA;
             otaSimInicio = millis();
+            publicarOTA("INICIANDO");
+            publicarTelemetria("OTA_INICIADO");
             lcdMostrarOTA();
         }
     }
@@ -847,6 +985,7 @@ void ejecutarDemo() {
         masaUltimaLectura  = 750.0;
         masaPlatilloActual = 0.0;
         distanciaUltima    = 5.0;
+        demoFase           = DFASE_REPOSO;
         estadoActual       = REPOSO;
         lcd.clear();
         Serial.println(">>> [DEMO] Ciclo completo - reiniciando en 3s");

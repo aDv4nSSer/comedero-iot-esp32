@@ -2,6 +2,10 @@
   "version": 1,
   "author": "Antonio - UBO",
   "editor": "wokwi",
+  "serialMonitor": {
+    "display": "terminal",
+    "newline": "lf"
+  },
   "parts": [
     { "type": "board-esp32-devkit-c-v4", "id": "esp",    "top": 20,   "left": 0,    "attrs": {} },
 
