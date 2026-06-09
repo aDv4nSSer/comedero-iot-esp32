@@ -90,7 +90,7 @@ const float CAPACIDAD_TANQUE_G   = 1000.0f;
 const float DIST_VACIO_CM        =   20.0f;
 const float UMBRAL_BOVEDA_PCT    =    0.30f;
 const float ALPHA_EMA            =    0.30f;
-const float UMBRAL_VERIF_PCT     =    0.70f;
+const float UMBRAL_VERIF_PCT     =    0.50f;  // 50% para Wokwi (slider impreciso)
 const unsigned long TIMEOUT_MOTOR_MS    = 30000;
 const unsigned long OTA_SIM_DURACION_MS = 5000;
 
@@ -521,11 +521,20 @@ float leerMasaG() {
 
 float leerMasaPlatilloG() {
     if (balanza2.is_ready()) {
-        float lectura = (float)balanza2.read() / 20.0f;
-        // En Wokwi el segundo HX711 puede no tener slider; la simulación
-        // usa masaPlatilloActual directamente mediante el comando "PLATILLO"
+        long raw = balanza2.read();
+        float lectura = (float)raw / 20.0f;
         float leido = constrain(lectura, 0.0f, CAPACIDAD_TANQUE_G);
-        if (leido > 0.0f) masaPlatilloActual = leido;
+        // Guard > 0: protege el valor del comando PLATILLO cuando el slider esta en 0.
+        // Si el slider sube, leido > 0 y sobreescribe correctamente.
+        if (leido > 0.0f) {
+            masaPlatilloActual = leido;
+            static unsigned long ultimoDebugPlat = 0;
+            if (millis() - ultimoDebugPlat > 1000) {
+                ultimoDebugPlat = millis();
+                Serial.printf("[HX711b] raw=%ld → %.1fg (platilloActual=%.1fg)\n",
+                              raw, leido, masaPlatilloActual);
+            }
+        }
     }
     return masaPlatilloActual;
 }
@@ -793,6 +802,9 @@ void handleDispensando() {
         actualizarEMA(dispensado);
 
         float recibido = masaPlatilloActual - masaPlatilloAntes;
+        Serial.printf(">> Platillo antes: %.1fg ahora: %.1fg diff: %.1fg (umbral: %.1fg)\n",
+                      masaPlatilloAntes, masaPlatilloActual, recibido,
+                      masaObjetivoG * UMBRAL_VERIF_PCT);
         if (recibido >= masaObjetivoG * UMBRAL_VERIF_PCT) {
             estadoVerificacion = "OK";
             Serial.printf("[FSM] Verificacion OK: platillo recibio %.1fg\n", recibido);
@@ -831,6 +843,8 @@ void handleDispensando() {
     if (millis() - ultimaActualizLCD > 500) {
         ultimaActualizLCD = millis();
         lcdMostrarDispensando();
+        Serial.printf("[DISP] tanque:%.1fg dispensado:%.1fg | platillo antes:%.1fg ahora:%.1fg\n",
+                      masaUltimaLectura, dispensado, masaPlatilloAntes, masaPlatilloActual);
     }
 }
 
@@ -940,20 +954,23 @@ void ejecutarDemo() {
         }
     }
 
-    // FASE 4 — 30-45s: Bajar masa tanque gradualmente
-    if (t >= 30000 && t < 45000 && estadoActual == DISPENSANDO) {
+    // FASE 4 — 30-50s: Bajar masa tanque gradualmente (3g/800ms → ~15s para 56g)
+    // Con Rex 18kg Hills Senior: racion=56.2g, a 3g/800ms completa en ~15s (t≈45s)
+    if (t >= 30000 && t < 50000 && estadoActual == DISPENSANDO) {
         static unsigned long ultimaBajada = 0;
-        if (millis() - ultimaBajada > 400) {
+        if (millis() - ultimaBajada > 800) {
             ultimaBajada = millis();
-            masaUltimaLectura = max(0.0f, masaUltimaLectura - 6.0f);
+            masaUltimaLectura = max(0.0f, masaUltimaLectura - 3.0f);
         }
     }
 
-    // FASE 5 — 45s: Platillo recibe alimento
-    if (t >= 45000 && t < 45100) {
+    // FASE 5 — 40s: Platillo recibe alimento ANTES de que termine la dispensacion (~t=45s)
+    // Garantiza que masaPlatilloActual > 0 cuando se evalua la verificacion
+    if (t >= 40000 && t < 40100) {
         masaPlatilloActual += 85.0;
         demoFase = DFASE_VERIFICACION;
-        Serial.println(">>> [SENSOR] Platillo: +85g recibidos");
+        Serial.printf(">>> [SENSOR] Platillo: +85g → total=%.1fg (antes=%.1fg)\n",
+                      masaPlatilloActual, masaPlatilloAntes);
     }
 
     // FASE 6 — 65s: Efecto Boveda (fusion sensorial)
