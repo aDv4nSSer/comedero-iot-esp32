@@ -72,11 +72,11 @@ const int   DAYLIGHT_SEC = 0;
 #define PIN_TRIG         5
 #define PIN_ECHO        18
 #define PIN_SERVO       13
-#define PIN_BUZZER      32
-#define PIN_VIBRADOR    33   // definido para compatibilidad; sin efecto visual en Wokwi
+#define PIN_BUZZER       4
+#define PIN_VIBRADOR     8   // definido para compatibilidad; sin efecto visual en Wokwi
 #define PIN_HX711_DT2   14
 #define PIN_HX711_SCK2  15
-#define PIN_NEOPIXEL    19
+#define PIN_NEOPIXEL    38
 #define PIN_SDA         21
 #define PIN_SCL         22
 

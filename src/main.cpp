@@ -73,23 +73,14 @@ const int   DAYLIGHT_SEC = 0;
 #define PIN_TRIG         5   // HC-SR04 trigger
 #define PIN_ECHO        18   // HC-SR04 echo
 #define PIN_SERVO       13   // Servo compuerta (reemplaza Motor DC + L298N)
-#define PIN_BUZZER      32   // Buzzer piezoeléctrico
-#define PIN_VIBRADOR    33   // Vibrador físico (activo HIGH)
+#define PIN_BUZZER       4   // Buzzer piezoeléctrico
+#define PIN_VIBRADOR     8   // Vibrador físico (activo HIGH)
 #define PIN_HX711_DT2   14   // HX711 platillo mascota — data
 #define PIN_HX711_SCK2  15   // HX711 platillo mascota — clock
-#define PIN_NEOPIXEL    19   // Anillo NeoPixel DIN  ← GPIO19=USB-D- en S3+CDC
+#undef  PIN_NEOPIXEL           // el framework S3 lo define como 48 (LED integrado)
+#define PIN_NEOPIXEL    38   // Anillo NeoPixel externo DIN
 #define PIN_SDA         21   // I2C SDA (LCD)
 #define PIN_SCL         22   // I2C SCL (LCD)
-
-// ── Verificación de pines incompatibles con ESP32-S3 ──────────────────────
-// GPIO32/33 están ocupados por Flash/PSRAM internos en el ESP32-S3-N16R8.
-// GPIO19/20 son USB D-/D+ cuando ARDUINO_USB_CDC_ON_BOOT=1.
-// Reasignar estos pines antes de compilar para S3.
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-  #error "S3: PIN_BUZZER=32 → Flash interno. Reasignar a GPIO4 u otro libre."
-  #error "S3: PIN_VIBRADOR=33 → PSRAM OPI. Reasignar a GPIO8 u otro libre."
-  #error "S3: PIN_NEOPIXEL=19 → USB D- (CDC). Reasignar a GPIO38 u otro libre."
-#endif
 
 // ─────────────────────────────────────────────────────────────────────
 // NEOPIXEL
